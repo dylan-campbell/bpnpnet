@@ -66,7 +66,7 @@ parser.add_argument('--gpu', default=None, type=int,
                     help='GPU id to use.')
 parser.add_argument('--log-dir', dest='log_dir', default='', type=str,
                     help='Directory for logging loss and accuracy')
-parser.add_argument('-ntrain', '--num_points_train', default=1000, type=int, metavar='NTRAIN',
+parser.add_argument('--num_points_train', default=1000, type=int, metavar='NTRAIN',
                     help='number of points for each training point-set (default: 1000)')
 parser.add_argument('--poseloss', dest='poseloss', default=0, type=int,
                     help='specify epoch at which to introduce pose loss')
