@@ -1,7 +1,6 @@
 import numpy as np
 import os
 import pickle
-
 import torch
 
 def load_data_3d2d_modelnet40(data_folder, dataset_split, preprocessed=True):
