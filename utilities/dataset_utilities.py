@@ -1,7 +1,5 @@
 import numpy as np
-import cv2
 import os
-import glob
 import pickle
 
 import torch

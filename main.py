@@ -1,5 +1,6 @@
 # BLINDPNP SOLVER WITH DECLARATIVE SINKHORN AND PNP NODES
 # Dylan Campbell <dylan.campbell@anu.edu.au>
+# Liu Liu <liu.liu@anu.edu.au>
 # Stephen Gould <stephen.gould@anu.edu.au>
 #
 # Modified from PyTorch ImageNet example:
@@ -15,9 +16,7 @@ import numpy as np
 import cv2
 import math
 import pickle
-
-import statistics # for median
-
+import statistics
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -28,10 +27,11 @@ import torch.utils.tensorboard as tb
 
 from model.model import DBPnP
 # from model.model_hungarian import DBPnP # At test time only
+from lib.losses import *
 import utilities.geometry_utilities as geo
 from utilities.dataset_utilities import Dataset
 
-torch.manual_seed(2809)
+# torch.manual_seed(2809)
 
 parser = argparse.ArgumentParser(description='PyTorch DeepBlindPnP Training')
 parser.add_argument('data_dir', metavar='DIR',
@@ -72,170 +72,6 @@ parser.add_argument('--poseloss', dest='poseloss', default=0, type=int,
                     help='specify epoch at which to introduce pose loss')
 parser.add_argument('--frac_outliers', default=0.0, type=float,dest='frac_outliers')
 
-# Error/success measures:
-
-def correspondenceMatrices(R, t, p2d, p3d, threshold):
-    # Form Boolean correspondence matrix given pose
-    p2d_bearings = torch.nn.functional.pad(p2d, (0, 1), "constant", 1.0)
-    p2d_bearings = torch.nn.functional.normalize(p2d_bearings, p=2, dim=-1)
-    p3d_bearings = geo.transform_and_normalise_points(p3d, R, t)
-    dot_product = torch.einsum('bmd,bnd->bmn', (p2d_bearings, p3d_bearings))
-    return (dot_product >= math.cos(threshold)).float()
-
-def correspondenceMatricesTheta(theta, p2d, p3d, threshold):
-    R = geo.angle_axis_to_rotation_matrix(theta[..., :3])
-    t = theta[..., 3:]
-    return correspondenceMatrices(R, t, p2d, p3d, threshold)
-
-def correspondenceProbabilityDistances(P, C):
-    """ Difference between the probability mass assigned to inlier and
-        outlier correspondences
-    """
-    return ((1.0 - 2.0 * C) * P).sum(dim=(-2, -1))
-
-def numInliers(R, t, p2d, p3d, threshold):
-    return correspondenceMatrices(R, t, p2d, p3d, threshold).sum(dim=(-2, -1))
-
-def numInliersTheta(theta, p2d, p3d, threshold):
-    R = geo.angle_axis_to_rotation_matrix(theta[..., :3])
-    t = theta[..., 3:]
-    return numInliers(R, t, p2d, p3d, threshold)
-
-def rotationErrors(R, R_gt, eps=1e-7):
-    # Gradient is non-differentiable at acos(1) and acos(-1)
-    max_dot_product = 1.0 - eps
-    return (0.5 * ((R * R_gt).sum(dim=(-2, -1)) - 1.0)).clamp_(-max_dot_product, max_dot_product).acos()
-
-def rotationErrorsTheta(theta, R_gt, eps=1e-7):
-    R = geo.angle_axis_to_rotation_matrix(theta[..., :3])
-    return rotationErrors(R, R_gt, eps)
-
-def translationErrors(t, t_gt):
-    return (t - t_gt).norm(dim=-1)
-
-def translationErrorsTheta(theta, t_gt):
-    t = theta[..., 3:]
-    return translationErrors(t, t_gt)
-
-def reprojectionErrors(R, t, p2d, p3d, P, eps=1e-7):
-    """ Sum angular deviation between projected 3D points and 2D points
-    Weighted by matrix P, which may be a correspondence probability matrix
-    or a Boolean correspondence matrix C
-    """
-    max_dot_product = 1.0 - eps
-    f = torch.nn.functional.pad(p2d, (0, 1), "constant", 1.0)
-    f = torch.nn.functional.normalize(f, p=2, dim=-1)
-    pt = geo.transform_and_normalise_points(p3d, R, t)
-    dot_product = torch.einsum('bmd,bnd->bmn', (f, pt))
-    angle = dot_product.clamp(-max_dot_product, max_dot_product).acos()
-    P = P.div(P.sum(dim=(-2, -1), keepdim=True)) # Normalise P (sums to 1)
-    return torch.einsum('bmn,bmn->b', (P, angle))
-
-def reprojectionErrorsTheta(theta, p2d, p3d, P, eps=1e-7):
-    R = geo.angle_axis_to_rotation_matrix(theta[..., :3])
-    t = theta[..., 3:]
-    return reprojectionErrors(R, t, p2d, p3d, P, eps)
-
-def reconstructionErrors(R, t, R_gt, t_gt, p):
-    """ Sum deviation between 3D points projected using ground-truth and estimated theta
-    Dependent on the scale of the point-set
-    """
-    pt = geo.transform_and_normalise_points(p, R, t)
-    pt_gt = geo.transform_and_normalise_points(p, R_gt, t_gt)
-    return (pt - pt_gt).norm(dim=-1).mean(dim=-1) # Average over points
-
-def angularReconstructionErrors(R, t, R_gt, t_gt, p):
-    """ Sum angular deviation between 3D points projected using ground-truth and estimated theta
-    Dependent on the scale of the point-set
-    """
-    pt = geo.transform_and_normalise_points(p, R, t)
-    pt_gt = geo.transform_and_normalise_points(p, R_gt, t_gt)
-    dot_product = torch.einsum('bnd,bnd->bn', (pt, pt_gt))
-    return 1.0 - dot_product.mean(dim=-1) # Average over points
-
-# Loss functions:
-
-def rotationLoss(R, R_gt, max_rotation_angle=1.570796): # pi/2
-    return rotationErrors(R, R_gt).clamp_max(max_rotation_angle).mean()
-
-def weightedRotationLoss(R, R_gt, weights, max_rotation_angle=1.570796):
-    return (weights * rotationErrors(R, R_gt).clamp_max(max_rotation_angle)).mean()
-
-def translationLoss(t, t_gt, max_translation_error=1.0):
-    return translationErrors(t, t_gt).clamp_max(max_translation_error).mean()
-
-def weightedTranslationLoss(t, t_gt, weights, max_translation_error=1.0):
-    return (weights * translationErrors(t, t_gt).clamp_max(max_translation_error)).mean()
-
-def reprojectionLoss(R, t, p2d, p3d, P):
-    return reprojectionErrors(R, t, p2d, p3d, P, eps=1e-7).mean() # Average over batch
-
-def reconstructionLoss(R, t, R_gt, t_gt, p):
-    return reconstructionErrors(R, t, R_gt, t_gt, p).mean() # Average over batch
-
-def angularReconstructionLoss(R, t, R_gt, t_gt, p):
-    return angularReconstructionErrors(R, t, R_gt, t_gt, p).mean() # Average over batch
-
-def correspondenceLoss(P, C_gt):
-    # Using precomputed C
-    return correspondenceProbabilityDistances(P, C_gt).mean() # [-1, 1)
-
-def correspondenceLossFromPose(P, R_gt, t_gt, p2d, p3d, threshold):
-    # Computing C on the fly
-    C = correspondenceMatrix(R_gt, t_gt, p2d, p3d, threshold)
-    return correspondenceLoss(P, C)
-
-def weightedCorrespondenceLoss(P, C_gt, weights):
-    return (weights * correspondenceProbabilityDistances(P, C_gt)).mean() # [-1, 1)
-
-class TotalLoss(torch.nn.Module):
-    def __init__(self, gamma):
-        super(TotalLoss, self).__init__()
-        self.gamma = gamma
-    def forward(self, theta, P, R_gt, t_gt, C_gt):
-        if self.gamma > 0.0:
-            R = geo.angle_axis_to_rotation_matrix(theta[..., :3])
-            t = theta[..., 3:]
-            losses = torch.cat((
-                correspondenceLoss(P, C_gt).view(1),
-                rotationLoss(R, R_gt).view(1), # [0, pi]
-                translationLoss(t, t_gt).view(1), # [0, inf)
-                ))
-            loss = losses[0] + self.gamma * (losses[1] + losses[2])
-        else:
-            losses = correspondenceLoss(P, C_gt).view(1)
-            loss = losses[0]
-        return loss, losses
-
-class WeightedTotalLoss(torch.nn.Module):
-    def __init__(self, gamma):
-        super(TotalLoss, self).__init__()
-        self.gamma = gamma
-    def forward(self, theta, P, R_gt, t_gt, C_gt, p2d, p3d, num_points_2d, num_points_3d):
-        # Weight proportionally to the point-set size:
-        b, m, n = P.size()
-        weights = torch.min(num_points_2d, num_points_3d).float() / float(min(m, n)) # linear
-        weights = (2.0 * weights).tanh() # nonlinear
-        weights = weights.to(device=P.device)
-        if self.gamma > 0.0:
-            R = geo.angle_axis_to_rotation_matrix(theta[..., :3])
-            t = theta[..., 3:]
-            losses = torch.cat((
-                weightedCorrespondenceLoss(P, C_gt, weights).view(1),
-                weightedRotationLoss(R, R_gt, weights).view(1), # [0, pi]
-                weightedTranslationLoss(t, t_gt, weights).view(1), # [0, inf)
-                ))
-            loss = losses[0] + self.gamma * (losses[1] + losses[2])
-        else:
-            losses = weightedCorrespondenceLoss(P, C_gt, weights).view(1)
-            loss = losses[0]
-        return loss, losses
-
-def print_num_parameters(model, name):
-  model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-  params = sum([np.prod(p.size()) for p in model_parameters])
-  print('Total parameters for %s: %d' % (name, params))
-
 def get_dataset(args):
     train_dataset = Dataset('train', args, args.batch_size, preprocessed=True)
     val_dataset   = Dataset('valid', args, 1, preprocessed=True)
@@ -260,8 +96,6 @@ def main():
         cudnn.deterministic = True
 
     model = DBPnP(args)
-
-    print_num_parameters(model, 'DBPnP')
 
     if args.gpu is not None:
         print("Using GPU {} for training".format(args.gpu))
@@ -501,26 +335,13 @@ def test(val_loader, model, criterion, epoch, args):
     with torch.no_grad():
         end = time.time()
 
-        rotation_errors0 = []
-        rotation_errors = []
-        rotation_errorsLM = []
-        translation_errors0 = []
-        translation_errors = []
-        translation_errorsLM = []
-        reprojection_errors0 = []
-        reprojection_errors = []
-        reprojection_errorsLM = []
-        reprojection_errorsGT = []
-        num_inliers0 = []
-        num_inliers = []
-        num_inliersLM = []
-        num_inliersGT = []
-        num_points_2d_list = []
-        num_points_3d_list = []
+        rotation_errors0, rotation_errors, rotation_errorsLM = [], [], []
+        translation_errors0, translation_errors, translation_errorsLM = [], [], []
+        reprojection_errors0, reprojection_errors, reprojection_errorsLM, reprojection_errorsGT = [], [], [], []
+        num_inliers0, num_inliers, num_inliersLM, num_inliersGT = [], [], [], []
+        thetas0, thetas, thetasLM = [], [], []
+        num_points_2d_list, num_points_3d_list = [], []
         inference_times = []
-        thetas0 = []
-        thetas = []
-        thetasLM = []
 
         start_time = time.time()
         for batch_index, (p2d, p3d, R_gt, t_gt, C_gt, num_points_2d, num_points_3d) in enumerate(val_loader):
