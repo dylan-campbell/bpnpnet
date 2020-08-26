@@ -16,6 +16,15 @@ This repository is a reference implementation for [this paper](https://arxiv.org
   organization={Springer},
 }
 ```
+The code for this work also contains contributions from the following paper ([code here](https://github.com/Liumouliu/Deep_blind_PnP)), which can be cited as:
+```
+@article{liu2020learning,
+  title={Learning 2D-3D Correspondences To Solve The Blind Perspective-n-Point Problem},
+  author={Liu, Liu and Campbell, Dylan and Li, Hongdong and Zhou, Dingfu and Song, Xibin and Yang, Ruigang},
+  journal={arXiv preprint arXiv:2003.06752},
+  year={2020}
+}
+```
 
 This work uses the Deep Declarative Networks (DDN) framework. For the full library and other applications, use [this link](https://github.com/anucvml/ddn).
 
@@ -100,6 +109,7 @@ The `bpnpnet` code is distributed under the MIT license. See the [LICENSE](LICEN
 
 ## Links
 
+- [Learning 2D-3D Correspondences To Solve The Blind Perspective-n-Point Problem](https://github.com/Liumouliu/Deep_blind_PnP): reference implementation for L. Liu, D. Campbell, H. Li, D. Zhou, X. Song, and R. Yang, "Learning 2D-3D Correspondences To Solve The Blind Perspective-n-Point Problem", arXiv preprint arXiv:2003.06752, 2020
 - [Learning to Find Good Correspondences](https://github.com/vcg-uvic/learned-correspondence-release): reference implementation for K. Yi, E. Trulls, Y. Ono, V. Lepetit, M. Salzmann, and P. Fua, "Learning to Find Good Correspondences", CVPR 2018
 - [ModelNet40](https://modelnet.cs.princeton.edu/)
 - [MegaDepth](https://research.cs.cornell.edu/megadepth/)
