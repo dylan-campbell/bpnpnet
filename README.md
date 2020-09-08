@@ -1,6 +1,6 @@
 # BPnPNet
-Solving the Blind Perspective-n-Point Problem End-To-End With Robust Differentiable Geometric Optimization
-Dylan Campbell, Liu Liu, and Stephen Gould
+Solving the Blind Perspective-n-Point Problem End-To-End With Robust Differentiable Geometric Optimization  
+Dylan Campbell, Liu Liu, and Stephen Gould  
 ECCV 2020
 
 This repository is a reference implementation for [this paper](https://arxiv.org/abs/2007.14628). If you use this code in your research, please cite as:
