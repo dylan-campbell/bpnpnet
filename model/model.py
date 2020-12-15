@@ -33,7 +33,7 @@ def ransac_p3p(P, p2d, p3d, num_points_2d, num_points_3d):
     # 1. Choose top k correspondences:
     k = min(1000, round(1.5 * p2d.size(-2))) # Choose at most 1000 points
     _, P_topk_i = torch.topk(P.flatten(start_dim=-2), k=k, dim=-1, largest=True, sorted=True)
-    p2d_indices = P_topk_i / P.size(-1) # bxk (integer division)
+    p2d_indices = P_topk_i // P.size(-1) # bxk (integer division)
     p3d_indices = P_topk_i % P.size(-1) # bxk
     K = np.float32(np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]))
     dist_coeff = np.float32(np.array([0.0, 0.0, 0.0, 0.0]))
