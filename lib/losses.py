@@ -114,7 +114,7 @@ def correspondenceLoss(P, C_gt):
 
 def correspondenceLossFromPose(P, R_gt, t_gt, p2d, p3d, threshold):
     # Computing C on the fly
-    C = correspondenceMatrix(R_gt, t_gt, p2d, p3d, threshold)
+    C = correspondenceMatrices(R_gt, t_gt, p2d, p3d, threshold)
     return correspondenceLoss(P, C)
 
 def weightedCorrespondenceLoss(P, C_gt, weights):
