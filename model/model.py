@@ -101,9 +101,9 @@ class DBPnP(nn.Module):
         self.FeatureExtractor2d = FeatureExtractor(self.config_2d)
         self.FeatureExtractor3d = FeatureExtractor(self.config_3d)
         self.pairwiseL2Dist = pairwiseL2Dist
-        self.sinkhorn_mu = 0.1
+        self.sinkhorn_lambda = 10.0
         self.sinkhorn_tolerance=1e-9
-        self.sinkhorn = RegularisedTransport(self.sinkhorn_mu, self.sinkhorn_tolerance)
+        self.sinkhorn = RegularisedTransport(self.sinkhorn_lambda, self.sinkhorn_tolerance)
         self.ransac_p3p = ransac_p3p
         self.wbpnp = NonlinearWeightedBlindPnP()
 

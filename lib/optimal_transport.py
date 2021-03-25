@@ -1,11 +1,10 @@
-#
 # Entropy-regularised optimal transport layer
 #
-# y = argmin_u f(x, u; mu)
+# y = argmin_u f(x, u; lmbda)
 #     subject to h(u) = 0
 #            and u_i >= 0
 #
-# where f(x, u) = \sum_{i=1}^n (x_i * u_i + mu * u_i * (log(u_i) - 1))
+# where f(x, u) = \sum_{i=1}^n (x_i * u_i + u_i * (log(u_i) - 1) / lmbda)
 # and h(u) = Au - b
 # for A = [
 #          e_1 x n, ..., e_m x n,
@@ -20,7 +19,7 @@
 # Dylan Campbell <dylan.campbell@anu.edu.au>
 #
 # v0: 20191018
-#
+# v1: 20210325
 
 import torch
 
@@ -36,55 +35,42 @@ class RegularisedTransportFn(torch.autograd.Function):
         Advances in Neural Information Processing Systems
         https://papers.nips.cc/paper/4927-sinkhorn-distances-lightspeed-computation-of-optimal-transport.pdf
     """
-    def objectiveFn(m, p, mu=0.1):
+    @staticmethod
+    def objectiveFn(m, p, lmbda=10.0):
         """ Vectorised objective function
 
         Using:
             Equation (2) from [1]
         """
-        logw = torch.where(p > 0.0, p.log(), torch.full_like(p, -1e9))
-        return (p * m).sum(-1) + mu * (p * (logw - 1.0)).sum(-1)
+        return (p * m).sum(-1) + (p * (p.clamp_min(1e-36).log() - 1.0) / lmbda).sum(-1)
 
-    def sinkhorn(M, r=None, c=None, mu=0.1, tolerance=1e-9, iterations=None):
+    @staticmethod
+    def sinkhorn(M, r=None, c=None, lmbda=10.0, tolerance=1e-9, max_iterations=100, max_distance=5.0):
         """ Compute transport matrix P, given cost matrix M
         
         Using:
             Algorithm 1 from [1]
         """
-        max_distance = 5.0
-        K = (-M.clamp_max(max_distance) / mu).exp()
-        if r is None:
-            r = 1.0 / M.size()[-2]
-            u = M.new_full(M.size()[:-1], r).unsqueeze(-1)
-        else:
-            r = r.unsqueeze(-1)
-            u = r.clone()
-        if c is None:
-            c = 1.0 / M.size()[-1]
-        else:
-            c = c.unsqueeze(-1)
-        if iterations is None:
-            i = 0
-            max_iterations = 100
-            u_prev = torch.ones_like(u)
-            while (u - u_prev).norm(dim=-1).max() > tolerance:
-                if i > max_iterations:
-                    break
-                i += 1
-                u_prev = u
-                u = r / K.matmul(c / K.transpose(-2, -1).matmul(u))
-        else:
-            for i in range(iterations):
-                u = r / K.matmul(c / K.transpose(-2, -1).matmul(u))
+        K = (-lmbda * M.clamp_max(max_distance)).exp()
+        r = 1.0 / M.size(-2) if r is None else r.unsqueeze(-1) # Keep as scalar if uniform
+        c = 1.0 / M.size(-1) if c is None else c.unsqueeze(-1) # Keep as scalar if uniform
+        u = r.clone() if isinstance(r, torch.Tensor) else M.new_full(M.size()[:-1], r).unsqueeze(-1)
+        u_prev = torch.ones_like(u)
+        for i in range(max_iterations):
+            if torch.all(torch.isclose(u, u_prev, atol=tolerance, rtol=0.0)):
+                break
+            u_prev = u
+            u = r / K.matmul(c / K.transpose(-2, -1).matmul(u))
         v = c / K.transpose(-2, -1).matmul(u)
         P = (u * K) * v.transpose(-2, -1)
         return P
 
-    def gradientFn(P, mu, v):
+    @staticmethod
+    def gradientFn(P, lmbda, v):
         """ Compute vector-Jacobian product DJ(M) = DJ(P) DP(M) [b x m*n]
 
         DP(M) = (H^-1 * A^T * (A * H^-1 * A^T)^-1 * A * H^-1 - H^-1) * B
-        H = D_YY^2 f(x, y) = diag(mu / vec(P))
+        H = D_YY^2 f(x, y) = diag(1 / (lmbda * vec(P)))
         B = D_XY^2 f(x, y) = I
 
         Using:
@@ -96,7 +82,7 @@ class RegularisedTransportFn(torch.autograd.Function):
             P: (b, m, n) Torch tensor
                 batch of transport matrices
 
-            mu: float,
+            lmbda: float,
                 regularisation factor
 
             v: (b, m*n) Torch tensor
@@ -109,7 +95,7 @@ class RegularisedTransportFn(torch.autograd.Function):
         """
         with torch.no_grad():
             b, m, n = P.size()
-            B = P / mu
+            B = lmbda * P
             hinv = B.flatten(start_dim=-2)
             d1inv = B.sum(-1)[:, 1:].reciprocal() # Remove first element
             d2 = B.sum(-2)
@@ -136,11 +122,11 @@ class RegularisedTransportFn(torch.autograd.Function):
         return gradient
 
     @staticmethod
-    def forward(ctx, M, r=None, c=None, mu=0.1, tolerance=1e-9, iterations=None):
+    def forward(ctx, M, r=None, c=None, lmbda=10.0, tolerance=1e-9, max_iterations=100):
         """ Optimise the entropy-regularised Sinkhorn distance
 
         Solves:
-            argmin_u   sum_{i=1}^n (x_i * u_i + mu * u_i * (log(u_i) - 1))
+            argmin_u   sum_{i=1}^n (x_i * u_i + u_i * (log(u_i) - 1) / lmbda)
             subject to Au = 1, u_i >= 0 
 
         Using:
@@ -151,18 +137,18 @@ class RegularisedTransportFn(torch.autograd.Function):
                 batch of cost matrices,
                 assumption: non-negative
 
-            mu: float,
+            lmbda: float,
                 regularisation factor,
                 assumption: positive,
-                default: 0.1
+                default: 1.0
 
             tolerance: float,
                 stopping criteria for Sinkhorn algorithm,
                 assumption: positive,
                 default: 1e-9
 
-            iterations: int,
-                number of Sinkhorn iterations,
+            max_iterations: int,
+                max number of Sinkhorn iterations,
                 assumption: positive,
                 default: None
 
@@ -175,22 +161,22 @@ class RegularisedTransportFn(torch.autograd.Function):
             r = r.detach()
         if c is not None:
             c = c.detach()
-        P = RegularisedTransportFn.sinkhorn(M, r, c, mu, tolerance, iterations)
-        ctx.mu = mu
+        P = RegularisedTransportFn.sinkhorn(M, r, c, lmbda, tolerance, max_iterations)
+        ctx.lmbda = lmbda
         ctx.save_for_backward(P, r, c)
         return P.clone()
 
     @staticmethod
     def backward(ctx, grad_output):
         P, r, c = ctx.saved_tensors
-        mu = ctx.mu
+        lmbda = ctx.lmbda
         input_size = P.size()
         grad_input = None
         if ctx.needs_input_grad[0]:
             # Only compute gradient for non-zero rows and columns of P
             if r is None or c is None or ((r > 0.0).all() and (c > 0.0).all()):
                 grad_output = grad_output.flatten(start_dim=-2) # bxmn
-                grad_input = RegularisedTransportFn.gradientFn(P, mu, grad_output) # bxmn
+                grad_input = RegularisedTransportFn.gradientFn(P, lmbda, grad_output) # bxmn
                 grad_input = grad_input.reshape(input_size) # bxmxn
             else:
                 b, m, n = input_size
@@ -201,19 +187,35 @@ class RegularisedTransportFn(torch.autograd.Function):
                     p = r_num_nonzero[i]
                     q = c_num_nonzero[i]
                     grad_output_i = grad_output[i:(i+1), :p, :q].flatten(start_dim=-2) # bxpq
-                    grad_input_i = RegularisedTransportFn.gradientFn(P[i:(i+1), :p, :q], mu, grad_output_i)
+                    grad_input_i = RegularisedTransportFn.gradientFn(P[i:(i+1), :p, :q], lmbda, grad_output_i)
                     grad_input_i = grad_input_i.reshape((1, p, q))
                     grad_input_i = torch.nn.functional.pad(grad_input_i, (0, n - q, 0, m - p), "constant", 0.0)
                     grad_input[i:(i+1), ...] = grad_input_i
         return grad_input, None, None, None, None, None
 
 class RegularisedTransport(torch.nn.Module):
-    def __init__(self, mu=0.1, tolerance=1e-9, iterations=None):
+    def __init__(self, lmbda=10.0, tolerance=1e-9, max_iterations=100):
         super(RegularisedTransport, self).__init__()
-        self.mu = mu
+        self.lmbda = lmbda
         self.tolerance = tolerance
-        self.iterations = iterations
+        self.max_iterations = max_iterations
             
     def forward(self, M, r=None, c=None):
-        return RegularisedTransportFn.apply(M, r, c, self.mu, self.tolerance, self.iterations)
+        return RegularisedTransportFn.apply(M, r, c, self.lmbda, self.tolerance, self.max_iterations)
 
+if __name__ == '__main__':
+    # Test Sinkhorn
+    torch.manual_seed(0)
+    sinkhorn = RegularisedTransport(lmbda=10.0, tolerance=1e-9, max_iterations=100)
+    b, m, n = 2, 5, 10
+    M = torch.randn((b, m, n), dtype=torch.float).abs()
+    P = sinkhorn(M)
+    # r = M.new_ones((b, m)) / m # bxm
+    # c = M.new_ones((b, n)) / n # bxn
+    # P = sinkhorn(M, r, c)
+
+    print(M)
+    print(P)
+    print(torch.sum(P, -1))
+    print(torch.sum(P, -2))
+    print(torch.einsum("bij,bij->b", M, P))
