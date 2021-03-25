@@ -36,13 +36,17 @@ class RegularisedTransportFn(torch.autograd.Function):
         https://papers.nips.cc/paper/4927-sinkhorn-distances-lightspeed-computation-of-optimal-transport.pdf
     """
     @staticmethod
-    def objectiveFn(m, p, lmbda=10.0):
-        """ Vectorised objective function
+    def objectiveFn(M, P, r, c, lmbda=10.0):
+        """ Entropy-regularised Sinkhorn objective function
 
         Using:
             Equation (2) from [1]
         """
-        return (p * m).sum(-1) + (p * (p.clamp_min(1e-36).log() - 1.0) / lmbda).sum(-1)
+        # return (P * M).sum((-2, -1)) + (P * (P.clamp_min(1e-36).log() - 1.0) / lmbda).sum((-2, -1))
+        # Ignore zeroed rows and cols
+        rc = torch.einsum('bi,bj->bij', r, c)
+        logprc = torch.where(rc == 0.0, torch.zeros_like(rc), P.clamp_min(1e-36).log() - rc.clamp_min(1e-36).log())
+        return (P * M).sum((-2, -1)) + (P * logprc / lmbda).sum((-2, -1))
 
     @staticmethod
     def sinkhorn(M, r=None, c=None, lmbda=10.0, tolerance=1e-9, max_iterations=100, max_distance=5.0):
@@ -116,7 +120,7 @@ class RegularisedTransportFn(torch.autograd.Function):
             u2 = vHinv.reshape((-1, m, n)).sum(-2).unsqueeze(-2)
             u3 = u1.matmul(Q) + u2.matmul(R.transpose(-2, -1))
             u4 = u1.matmul(R) + u2.matmul(Sinv)
-            u5 = u3.expand(-1, n, -1).transpose(-2, -1)+u4.expand(-1, m-1, -1)
+            u5 = u3.expand(-1, n, -1).transpose(-2, -1) + u4.expand(-1, m - 1, -1)
             uHinv = torch.cat((u4, u5), dim=-2).flatten(start_dim=-2) * hinv
             gradient = uHinv - vHinv
         return gradient
@@ -204,18 +208,29 @@ class RegularisedTransport(torch.nn.Module):
         return RegularisedTransportFn.apply(M, r, c, self.lmbda, self.tolerance, self.max_iterations)
 
 if __name__ == '__main__':
-    # Test Sinkhorn
+    # Test Sinkhorn algorithm
     torch.manual_seed(0)
     sinkhorn = RegularisedTransport(lmbda=10.0, tolerance=1e-9, max_iterations=100)
     b, m, n = 2, 5, 10
     M = torch.randn((b, m, n), dtype=torch.float).abs()
-    P = sinkhorn(M)
-    # r = M.new_ones((b, m)) / m # bxm
-    # c = M.new_ones((b, n)) / n # bxn
-    # P = sinkhorn(M, r, c)
+    # r, c = None, None
+    # Zero out last k prior probabilities
+    k = 2
+    r = M.new_ones((b, m)) / (m - k) # bxm
+    c = M.new_ones((b, n)) / (n - k) # bxn
+    r[:, (m - 2):] = torch.zeros_like(r[:, (m - k):])
+    c[:, (n - 2):] = torch.zeros_like(c[:, (n - k):])
+    
+    P = sinkhorn(M.requires_grad_(True), r, c)
+
+    P_tgt = P.clone()
+    P_tgt[:, :(m - k), :(n - k)] = torch.softmax(10000.0 * P[:, :(m - k), :(n - k)], -1)
+    (P - P_tgt).mean().backward()
 
     print(M)
     print(P)
     print(torch.sum(P, -1))
     print(torch.sum(P, -2))
     print(torch.einsum("bij,bij->b", M, P))
+    print(RegularisedTransportFn.objectiveFn(M, P, r, c))
+    # print(M.grad)
